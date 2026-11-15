@@ -10,7 +10,7 @@ import { ClientVaultSnapshot } from './server/ai/keyVault.ts';
 import {
   executeLyricsTranslation,
   LyricsTranslationHttpError,
-  searchOnlineLyricsCombined,
+  searchOnlineLyricsDetailed,
 } from './server/ai/lyricsCore.ts';
 import {
   cancelServerStemJob,
@@ -244,17 +244,34 @@ async function startServer() {
     }
   });
 
-  // Multi-source lyric search (aggregates native bilingual sources + LRCLIB)
+  // Multi-source lyric search (aggregates LRCLIB + 网易云双语 + 酷狗音乐 with scoring & TTL cache)
   app.get('/api/lyrics/search', async (req, res) => {
     const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
-    if (!q) {
+    const title = typeof req.query.title === 'string' ? req.query.title.trim() : '';
+    const artist = typeof req.query.artist === 'string' ? req.query.artist.trim() : '';
+    const album = typeof req.query.album === 'string' ? req.query.album.trim() : '';
+    const durationRaw =
+      typeof req.query.duration === 'string' ? Number(req.query.duration) : 0;
+    const duration =
+      Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : undefined;
+
+    if (!q && !title && !artist) {
       res.status(400).json({ error: '缺少搜索关键词' });
       return;
     }
 
     try {
-      const combined = await searchOnlineLyricsCombined(q);
-      res.json(combined);
+      const detailed = await searchOnlineLyricsDetailed({
+        q,
+        title,
+        artist,
+        album,
+        duration,
+      });
+      res.setHeader('X-Lumina-Search-Cache', detailed.cacheHit ? 'HIT' : 'MISS');
+      res.setHeader('X-Lumina-Search-Ms', String(detailed.elapsedMs));
+      res.setHeader('Cache-Control', 'public, max-age=120');
+      res.json(detailed.results);
     } catch (err) {
       res.status(502).json({
         error: err instanceof Error ? err.message : '歌词检索服务暂时不可用',

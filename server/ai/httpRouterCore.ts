@@ -30,7 +30,7 @@ import {
 import {
   executeLyricsTranslation,
   LyricsTranslationHttpError,
-  searchOnlineLyricsCombined,
+  searchOnlineLyricsDetailed,
 } from './lyricsCore.ts';
 import { callProviderTextCompletion } from './providerClient.ts';
 
@@ -160,12 +160,29 @@ export async function handleApiWebRequest(req: Request): Promise<Response> {
   // Lyrics Search & Translation
   if (method === 'GET' && pathname === '/lyrics/search') {
     const q = (url.searchParams.get('q') || '').trim();
-    if (!q) {
+    const title = (url.searchParams.get('title') || '').trim();
+    const artist = (url.searchParams.get('artist') || '').trim();
+    const album = (url.searchParams.get('album') || '').trim();
+    const durationRaw = Number(url.searchParams.get('duration') || '0');
+    const duration =
+      Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : undefined;
+
+    if (!q && !title && !artist) {
       return jsonResponse({ error: '缺少搜索关键词' }, 400);
     }
     try {
-      const combined = await searchOnlineLyricsCombined(q);
-      return jsonResponse(combined);
+      const detailed = await searchOnlineLyricsDetailed({
+        q,
+        title,
+        artist,
+        album,
+        duration,
+      });
+      return jsonResponse(detailed.results, 200, {
+        'X-Lumina-Search-Cache': detailed.cacheHit ? 'HIT' : 'MISS',
+        'X-Lumina-Search-Ms': String(detailed.elapsedMs),
+        'Cache-Control': 'public, max-age=120',
+      });
     } catch (err) {
       return jsonResponse(
         { error: err instanceof Error ? err.message : '歌词检索服务暂时不可用' },

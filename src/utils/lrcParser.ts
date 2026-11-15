@@ -360,46 +360,223 @@ export interface OnlineLyricResult {
   plainLyrics: string | null;
   hasNativeTranslation?: boolean;
   source?: string;
+  matchScore?: number;
+  lineCount?: number;
+  durationDiffSec?: number;
+}
+
+export interface SearchOnlineLyricsOptions {
+  album?: string;
+  duration?: number;
+  signal?: AbortSignal;
+  forceRefresh?: boolean;
 }
 
 export type LyricTargetLanguage = 'zh-CN' | 'zh-TW' | 'en' | 'ja';
 
+const CLIENT_NOISE_TAGS_RE =
+  /\s*[\(\[【（](?:explicit|clean|remaster(?:ed)?(?:\s*\d{4})?|deluxe(?:\s*edition)?|mono|stereo|single\s*version|album\s*version|radio\s*edit|official\s*(?:audio|video|lyric\s*video|mv)|lyric\s*video|audio|flac|hi-?res|lossless|\d{4}\s*(?:remaster|mix|ver\.?))[\)\]】）]/gi;
+
+export function cleanTrackTitleForSearch(rawTitle: string): string {
+  return (rawTitle || '')
+    .replace(/\.(mp3|flac|wav|aac|m4a|ogg|opus|wma|alac|aiff)$/i, '')
+    .replace(CLIENT_NOISE_TAGS_RE, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+const CLIENT_LYRIC_CACHE_TTL_MS = 3 * 60 * 1000;
+const CLIENT_LYRIC_CACHE_MAX = 80;
+const clientLyricCache = new Map<
+  string,
+  { results: OnlineLyricResult[]; expiresAt: number }
+>();
+
+function normClientText(text: string): string {
+  return (text || '')
+    .normalize('NFKC')
+    .toLowerCase()
+    .replace(/[\p{P}\p{S}]+/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function scoreClientFallbackResult(
+  item: OnlineLyricResult,
+  cleanTitle: string,
+  cleanArtist: string,
+  durationSec?: number
+): OnlineLyricResult {
+  const qt = normClientText(cleanTitle);
+  const ct = normClientText(cleanTrackTitleForSearch(item.trackName || ''));
+  let score = 0;
+  if (qt && ct) {
+    if (qt === ct) score += 45;
+    else if (ct.includes(qt) || qt.includes(ct)) score += 30;
+  }
+  if (cleanArtist) {
+    const qa = normClientText(cleanArtist);
+    const ca = normClientText(item.artistName || '');
+    if (qa && ca) {
+      if (qa === ca || ca.includes(qa) || qa.includes(ca)) score += 25;
+      else score -= 15;
+    }
+  }
+  let durationDiffSec: number | undefined;
+  if (durationSec && durationSec > 0 && item.duration > 0) {
+    durationDiffSec = Math.round(Math.abs(durationSec - item.duration));
+    if (durationDiffSec <= 2) score += 24;
+    else if (durationDiffSec <= 5) score += 15;
+    else if (durationDiffSec > 15) score -= 18;
+  }
+  if (item.syncedLyrics) score += 14;
+  if (item.hasNativeTranslation) score += 10;
+
+  const lineCount = (item.syncedLyrics || item.plainLyrics || '')
+    .split(/\r?\n/)
+    .filter((l) => l.replace(LINE_TIME_REGEX, '').trim().length > 0).length;
+
+  return {
+    ...item,
+    matchScore: Math.max(0, Math.min(100, score)),
+    lineCount: item.lineCount ?? lineCount,
+    durationDiffSec: item.durationDiffSec ?? durationDiffSec,
+  };
+}
+
 export async function searchOnlineLyrics(
   title: string,
-  artist: string
+  artist: string,
+  options: SearchOnlineLyricsOptions = {}
 ): Promise<OnlineLyricResult[]> {
-  const cleanTitle = title.replace(/\.[^.]+$/, '').trim();
+  const cleanTitle = cleanTrackTitleForSearch(title);
   const cleanArtist =
-    artist && artist !== '未知艺术家' && artist !== 'Unknown Artist' ? artist.trim() : '';
+    artist &&
+    artist !== '未知艺术家' &&
+    artist !== 'Unknown Artist' &&
+    artist !== 'Lumina Acoustic Ensemble'
+      ? artist.trim()
+      : '';
+  const cleanAlbum = (options.album || '').trim();
+  const durationSec =
+    typeof options.duration === 'number' &&
+    Number.isFinite(options.duration) &&
+    options.duration > 0
+      ? Math.round(options.duration)
+      : undefined;
 
   const query = [cleanTitle, cleanArtist].filter(Boolean).join(' ');
   if (!query) return [];
 
-  let data: OnlineLyricResult[];
-  const apiRes = await fetch(`/api/lyrics/search?q=${encodeURIComponent(query)}`, {
-    headers: { Accept: 'application/json' },
-  });
+  const cacheKey = [
+    normClientText(cleanTitle),
+    normClientText(cleanArtist),
+    normClientText(cleanAlbum),
+    durationSec ? String(Math.round(durationSec / 2) * 2) : '0',
+  ].join('|');
 
-  if (apiRes.ok) {
-    data = (await apiRes.json()) as OnlineLyricResult[];
-  } else {
-    const directRes = await fetch(
-      `https://lrclib.net/api/search?q=${encodeURIComponent(query)}`,
-      { headers: { Accept: 'application/json' } }
-    );
-    if (!directRes.ok) {
-      throw new Error(`歌词检索请求失败 (${directRes.status})`);
+  if (!options.forceRefresh) {
+    const hit = clientLyricCache.get(cacheKey);
+    if (hit && hit.expiresAt > Date.now()) {
+      return hit.results;
     }
-    data = (await directRes.json()) as OnlineLyricResult[];
   }
 
-  return data.sort((a, b) => {
+  const params = new URLSearchParams({ q: query });
+  if (cleanTitle) params.set('title', cleanTitle);
+  if (cleanArtist) params.set('artist', cleanArtist);
+  if (cleanAlbum) params.set('album', cleanAlbum);
+  if (durationSec) params.set('duration', String(durationSec));
+
+  let data: OnlineLyricResult[] | null = null;
+
+  try {
+    const apiRes = await fetch(`/api/lyrics/search?${params.toString()}`, {
+      headers: { Accept: 'application/json' },
+      signal: options.signal,
+    });
+    if (apiRes.ok) {
+      data = (await apiRes.json()) as OnlineLyricResult[];
+    }
+  } catch (err) {
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      throw err;
+    }
+  }
+
+  if (!data) {
+    // Direct browser fallback to LRCLIB exact + search when backend proxy is unavailable
+    const requests: Promise<OnlineLyricResult[]>[] = [];
+    if (cleanTitle && cleanArtist) {
+      const getParams = new URLSearchParams({
+        track_name: cleanTitle,
+        artist_name: cleanArtist,
+      });
+      if (durationSec) getParams.set('duration', String(durationSec));
+      requests.push(
+        fetch(`https://lrclib.net/api/get?${getParams.toString()}`, {
+          headers: { Accept: 'application/json' },
+          signal: options.signal,
+        })
+          .then(async (r) => (r.ok ? [(await r.json()) as OnlineLyricResult] : []))
+          .catch((e) => {
+            if (e instanceof DOMException && e.name === 'AbortError') throw e;
+            return [];
+          })
+      );
+    }
+
+    requests.push(
+      fetch(`https://lrclib.net/api/search?q=${encodeURIComponent(query)}`, {
+        headers: { Accept: 'application/json' },
+        signal: options.signal,
+      }).then(async (r) => {
+        if (!r.ok) {
+          throw new Error(`歌词检索请求失败 (${r.status})`);
+        }
+        return (await r.json()) as OnlineLyricResult[];
+      })
+    );
+
+    const settled = await Promise.all(requests);
+    const seen = new Set<number>();
+    data = [];
+    for (const item of settled.flat()) {
+      if (!item || seen.has(item.id) || (!item.syncedLyrics && !item.plainLyrics)) {
+        continue;
+      }
+      seen.add(item.id);
+      data.push(
+        scoreClientFallbackResult(
+          { ...item, source: item.source || 'LRCLIB' },
+          cleanTitle,
+          cleanArtist,
+          durationSec
+        )
+      );
+    }
+  }
+
+  const sorted = [...data].sort((a, b) => {
+    const scoreDiff = (b.matchScore || 0) - (a.matchScore || 0);
+    if (scoreDiff !== 0) return scoreDiff;
     if (a.hasNativeTranslation && !b.hasNativeTranslation) return -1;
     if (!a.hasNativeTranslation && b.hasNativeTranslation) return 1;
     if (a.syncedLyrics && !b.syncedLyrics) return -1;
     if (!a.syncedLyrics && b.syncedLyrics) return 1;
     return 0;
   });
+
+  if (clientLyricCache.size >= CLIENT_LYRIC_CACHE_MAX) {
+    const oldest = clientLyricCache.keys().next().value;
+    if (oldest !== undefined) clientLyricCache.delete(oldest);
+  }
+  clientLyricCache.set(cacheKey, {
+    results: sorted,
+    expiresAt: Date.now() + CLIENT_LYRIC_CACHE_TTL_MS,
+  });
+
+  return sorted;
 }
 
 export async function translateLyricsToBilingual(

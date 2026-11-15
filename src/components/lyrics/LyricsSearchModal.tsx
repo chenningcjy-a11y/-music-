@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertCircle,
   Check,
@@ -23,6 +23,7 @@ import { testProviderApi } from '../../services/ai/providerManager';
 import { TrackColorPalette, TrackMetadata } from '../../types/music';
 import { formatTime } from '../../utils/constants';
 import {
+  cleanTrackTitleForSearch,
   extractOriginalLyricsOnly,
   LyricTargetLanguage,
   OnlineLyricResult,
@@ -85,31 +86,65 @@ export const LyricsSearchModal: React.FC<LyricsSearchModalProps> = ({
   const [testingConnection, setTestingConnection] = useState(false);
   const [testResult, setTestResult] = useState<{ ok: boolean; msg: string } | null>(null);
 
-  useEffect(() => {
-    if (open && track) {
-      setTitleQuery(track.title.replace(/\(.*\)|\[.*\]/g, '').trim());
-      setArtistQuery(
-        track.artist === '未知艺术家' || track.artist === 'Lumina Acoustic Ensemble'
-          ? ''
-          : track.artist
-      );
-      setResults([]);
+  const searchAbortRef = useRef<AbortController | null>(null);
+
+  const runSearch = useCallback(
+    async (
+      qTitle: string,
+      qArtist: string,
+      opts?: { album?: string; duration?: number; forceRefresh?: boolean }
+    ) => {
+      if (!qTitle.trim() && !qArtist.trim()) return;
+      searchAbortRef.current?.abort();
+      const controller = new AbortController();
+      searchAbortRef.current = controller;
+
+      setLoading(true);
       setError(null);
-      setTranslatingId(null);
       setFailedTranslationId(null);
-      setTestResult(null);
-      setTranslationStyle(defaultTranslationStyle || 'poetic');
-      setCustomStylePrompt(personalization.customTranslationStylePrompt || '');
-      if (defaultTranslationProviderId && !selectedProviderId) {
-        setSelectedProviderId(defaultTranslationProviderId);
+
+      try {
+        const list = await searchOnlineLyrics(qTitle, qArtist, {
+          album: opts?.album,
+          duration: opts?.duration,
+          signal: controller.signal,
+          forceRefresh: opts?.forceRefresh,
+        });
+        if (controller.signal.aborted) return;
+        setResults(list);
+        if (list.length === 0) {
+          setError('未检索到匹配的在线歌词，请尝试简化歌名或手动导入 .lrc 文件。');
+        }
+      } catch (err) {
+        if (
+          controller.signal.aborted ||
+          (err instanceof DOMException && err.name === 'AbortError')
+        ) {
+          return;
+        }
+        setError(err instanceof Error ? err.message : '在线检索失败，请检查网络连接');
+      } finally {
+        if (!controller.signal.aborted) {
+          setLoading(false);
+        }
       }
-      if (defaultTranslationModel && !selectedModel) {
-        setSelectedModel(defaultTranslationModel);
-      }
+    },
+    []
+  );
+
+  // Sync default AI provider/style preferences cleanly without resetting search results
+  useEffect(() => {
+    if (!open) return;
+    setTranslationStyle(defaultTranslationStyle || 'poetic');
+    setCustomStylePrompt(personalization.customTranslationStylePrompt || '');
+    if (defaultTranslationProviderId && !selectedProviderId) {
+      setSelectedProviderId(defaultTranslationProviderId);
+    }
+    if (defaultTranslationModel && !selectedModel) {
+      setSelectedModel(defaultTranslationModel);
     }
   }, [
     open,
-    track,
     defaultTranslationStyle,
     defaultTranslationProviderId,
     defaultTranslationModel,
@@ -120,6 +155,41 @@ export const LyricsSearchModal: React.FC<LyricsSearchModalProps> = ({
     setSelectedModel,
   ]);
 
+  // Initialize queries & automatically start fast multi-source search on modal open
+  useEffect(() => {
+    if (!open || !track) {
+      searchAbortRef.current?.abort();
+      return;
+    }
+
+    const initialTitle = cleanTrackTitleForSearch(track.title);
+    const initialArtist =
+      track.artist === '未知艺术家' ||
+      track.artist === 'Unknown Artist' ||
+      track.artist === 'Lumina Acoustic Ensemble'
+        ? ''
+        : track.artist;
+
+    setTitleQuery(initialTitle);
+    setArtistQuery(initialArtist);
+    setResults([]);
+    setError(null);
+    setTranslatingId(null);
+    setFailedTranslationId(null);
+    setTestResult(null);
+
+    if (initialTitle || initialArtist) {
+      void runSearch(initialTitle, initialArtist, {
+        album: track.album,
+        duration: track.duration,
+      });
+    }
+
+    return () => {
+      searchAbortRef.current?.abort();
+    };
+  }, [open, track?.id, runSearch]); // eslint-disable-line react-hooks/exhaustive-deps
+
   const availableModels = useMemo(() => {
     if (!activeProvider) return [];
     const list = [activeProvider.model, ...(activeProvider.availableModels || [])];
@@ -128,21 +198,11 @@ export const LyricsSearchModal: React.FC<LyricsSearchModalProps> = ({
 
   const handleSearch = async (e?: React.FormEvent) => {
     if (e) e.preventDefault();
-    if (!titleQuery.trim() && !artistQuery.trim()) return;
-    setLoading(true);
-    setError(null);
-    setFailedTranslationId(null);
-    try {
-      const list = await searchOnlineLyrics(titleQuery, artistQuery);
-      setResults(list);
-      if (list.length === 0) {
-        setError('未检索到匹配的在线歌词，请尝试简化歌名或手动导入 .lrc 文件。');
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '在线检索失败，请检查网络连接');
-    } finally {
-      setLoading(false);
-    }
+    await runSearch(titleQuery, artistQuery, {
+      album: track?.album,
+      duration: track?.duration,
+      forceRefresh: true,
+    });
   };
 
   const handleTestConnection = async () => {
@@ -570,27 +630,37 @@ export const LyricsSearchModal: React.FC<LyricsSearchModalProps> = ({
             </div>
           )}
 
+          {loading && results.length === 0 && !error && (
+            <div className="py-12 text-center text-xs text-white/60 space-y-2">
+              <Loader2 className="w-5 h-5 animate-spin text-rose-300 mx-auto" />
+              <p>正在并发检索 LRCLIB、网易云与酷狗歌词库...</p>
+            </div>
+          )}
+
           {results.length === 0 && !loading && !error && (
             <div className="py-12 text-center text-xs text-white/45 space-y-1">
               <p>输入歌名或歌手并点击“搜索 LRC 歌词”</p>
               <p className="text-[11px] text-white/35">
-                支持聚合网易云原生双语歌词与 LRCLIB 纯净歌词，原文与译文独立归档
+                支持并发聚合 LRCLIB、网易云原生双语与酷狗歌词，结合时长与版本精准排序
               </p>
             </div>
           )}
 
-          {results.map((item) => {
+          {results.map((item, idx) => {
             const raw = item.syncedLyrics || item.plainLyrics;
             if (!raw) return null;
             const isSynced = Boolean(item.syncedLyrics);
             const isTranslating = translatingId === item.id;
             const showOriginalFallback = failedTranslationId === item.id;
             const hasNativeTrans = Boolean(item.hasNativeTranslation);
+            const isBestMatch = idx === 0 && (item.matchScore ?? 0) >= 75;
+            const isDurationMatched =
+              typeof item.durationDiffSec === 'number' && item.durationDiffSec <= 2;
             const providerLabel = activeProvider?.name || 'AI 模型';
 
             return (
               <div
-                key={item.id}
+                key={`${item.source || 'src'}-${item.id}`}
                 className="p-3.5 rounded-2xl bg-white/[0.05] hover:bg-white/[0.09] border border-white/10 flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-colors"
               >
                 <div className="min-w-0 flex-1">
@@ -598,6 +668,11 @@ export const LyricsSearchModal: React.FC<LyricsSearchModalProps> = ({
                     <p className="text-sm font-medium text-white truncate">
                       {item.trackName}
                     </p>
+                    {isBestMatch && (
+                      <span className="px-2 py-0.5 rounded-md text-[10px] bg-emerald-500/20 text-emerald-300 border border-emerald-400/30 font-medium shrink-0">
+                        最佳匹配
+                      </span>
+                    )}
                     {hasNativeTrans ? (
                       <span className="px-2 py-0.5 rounded-md text-[10px] bg-rose-500/20 text-rose-300 border border-rose-400/30 font-medium shrink-0">
                         自带双语
@@ -613,7 +688,9 @@ export const LyricsSearchModal: React.FC<LyricsSearchModalProps> = ({
                     {item.artistName}
                     {item.albumName ? ` · ${item.albumName}` : ''}
                     {item.duration ? ` · ${formatTime(item.duration)}` : ''}
+                    {isDurationMatched ? ' (时长吻合)' : ''}
                     {item.source ? ` · ${item.source}` : ''}
+                    {item.lineCount ? ` · ${item.lineCount} 句` : ''}
                     {' · '}
                     <span className={isSynced ? 'text-emerald-300 font-mono-tabular' : 'text-white/50'}>
                       {isSynced ? '带时间戳 LRC' : '纯文本'}
