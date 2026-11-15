@@ -209,7 +209,7 @@ export const LyricsPage: React.FC = () => {
   );
 
   return (
-    <div className="h-full flex flex-col px-4 sm:px-6 lg:px-10 py-5 gap-5 overflow-hidden">
+    <div className="h-full flex flex-col px-4 sm:px-6 lg:px-10 pt-5 pb-20 lg:pb-5 gap-5 overflow-y-auto lg:overflow-hidden lumina-scroll">
       <input
         ref={lrcInputRef}
         type="file"
@@ -311,8 +311,8 @@ export const LyricsPage: React.FC = () => {
       </div>
 
       {/* Main Lyrics Canvas + Sync Calibration & AI Translation Controls */}
-      <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-5">
-        <div className="lg:col-span-8 min-h-0 rounded-3xl bg-white/[0.04] backdrop-blur-2xl border border-white/10 p-5 sm:p-7 flex flex-col gap-3">
+      <div className="lg:flex-1 lg:min-h-0 grid grid-cols-1 lg:grid-cols-12 gap-5">
+        <div className="lg:col-span-8 min-h-[340px] lg:min-h-0 rounded-3xl bg-white/[0.04] backdrop-blur-2xl border border-white/10 p-5 sm:p-7 flex flex-col gap-3">
           {/* View Mode & Translation Metadata Strip */}
           {currentTrack && (
             <div className="flex flex-wrap items-center justify-between gap-2 pb-2 border-b border-white/8 shrink-0">
@@ -408,7 +408,7 @@ export const LyricsPage: React.FC = () => {
         </div>
 
         {/* Right AI Translation + Calibration & Display Controls */}
-        <aside className="lg:col-span-4 rounded-3xl bg-white/[0.045] backdrop-blur-xl border border-white/10 p-5 space-y-5 overflow-y-auto lumina-scroll">
+        <aside className="lg:col-span-4 rounded-3xl bg-white/[0.045] backdrop-blur-xl border border-white/10 p-5 space-y-5 lg:min-h-0 lg:overflow-y-auto lumina-scroll">
           {/* AI Lyrics Translation Workbench */}
           <div className="space-y-3.5">
             <div className="flex items-center justify-between gap-2">

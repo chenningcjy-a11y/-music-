@@ -144,7 +144,7 @@ export const AiTasksPage: React.FC = () => {
 
   if (selectedTask) {
     return (
-      <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 py-6">
+      <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 pt-6 pb-20">
         <TaskDetailView
           task={selectedTask}
           onBack={() => setSelectedTaskId(null)}
@@ -154,7 +154,7 @@ export const AiTasksPage: React.FC = () => {
   }
 
   return (
-    <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 py-6 space-y-6">
+    <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 pt-6 pb-20 space-y-6">
       {/* Header + Quick Independent Task Launcher */}
       <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4">
         <div className="flex items-start gap-3">

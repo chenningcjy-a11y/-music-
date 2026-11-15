@@ -74,7 +74,7 @@ const LuminaShell: React.FC = () => {
       : 'font-sans-modern';
 
   return (
-    <div className={`relative flex flex-col md:flex-row h-screen w-screen overflow-hidden select-none ${fontClass}`}>
+    <div className={`relative flex flex-col md:flex-row h-full w-full overflow-hidden select-none ${fontClass}`}>
       {/* Real-time Audio-Reactive Liquid Fluid Background */}
       <DynamicBackground
         palette={activePalette}
@@ -88,7 +88,7 @@ const LuminaShell: React.FC = () => {
 
       {/* Desktop & Landscape Tablet Left Glass Navigation Rail */}
       {!isFullscreen && (
-        <aside className="hidden md:flex flex-col justify-between w-20 lg:w-60 shrink-0 h-full bg-black/25 backdrop-blur-2xl border-r border-white/10 p-3 lg:p-4 z-20">
+        <aside className="hidden md:flex flex-col justify-between gap-4 w-20 lg:w-60 shrink-0 h-full min-h-0 overflow-y-auto lumina-scroll bg-black/25 backdrop-blur-2xl border-r border-white/10 p-3 lg:p-4 z-20">
         <div className="space-y-6">
           {/* Single-line Brand Wordmark */}
           <button
@@ -205,7 +205,7 @@ const LuminaShell: React.FC = () => {
 
       {/* Main Content Stage */}
       <main
-        className={`flex-1 min-w-0 min-h-0 relative z-10 ${
+        className={`flex-1 h-full min-w-0 min-h-0 overflow-hidden relative z-10 ${
           isFullscreen ? 'pb-0' : 'pb-14 md:pb-0'
         }`}
       >

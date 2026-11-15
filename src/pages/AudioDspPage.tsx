@@ -96,7 +96,7 @@ export const AudioDspPage: React.FC = () => {
     .join(' ');
 
   return (
-    <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 py-6 space-y-6">
+    <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 pt-6 pb-20 space-y-6">
       {/* Header + Master DSP Switch */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>

@@ -56,7 +56,7 @@ export const PlaylistsPage: React.FC = () => {
   };
 
   return (
-    <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 py-6 space-y-6">
+    <div className="h-full overflow-y-auto lumina-scroll px-4 sm:px-6 lg:px-10 pt-6 pb-20 space-y-6">
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl sm:text-3xl font-semibold text-white">

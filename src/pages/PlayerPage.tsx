@@ -487,14 +487,15 @@ export const PlayerPage: React.FC = () => {
 
   return (
     <div className="relative flex flex-col h-full w-full overflow-hidden">
-      {/* Main dual-column workspace */}
-      <div
-        className={`relative z-10 flex-1 min-h-0 w-full mx-auto grid items-center ${
-          showLyricsInPlayer
-            ? 'px-4 sm:px-6 lg:px-10 pt-3 sm:pt-5 pb-20 sm:pb-24 grid-cols-1 md:grid-cols-12 gap-6 lg:gap-10'
-            : 'max-w-2xl px-4 sm:px-6 lg:px-10 pt-3 sm:pt-5 pb-20 sm:pb-24 grid-cols-1 gap-6 lg:gap-10'
-        }`}
-      >
+      {/* Scrollable Main Dual-Column Workspace */}
+      <div className="relative z-10 flex-1 min-h-0 overflow-x-hidden overflow-y-auto lumina-scroll flex flex-col">
+        <div
+          className={`flex-1 min-h-full md:min-h-0 w-full mx-auto grid items-center ${
+            showLyricsInPlayer
+              ? 'px-4 sm:px-6 lg:px-10 pt-3 sm:pt-5 pb-20 sm:pb-24 grid-cols-1 md:grid-cols-12 gap-6 lg:gap-10'
+              : 'max-w-2xl px-4 sm:px-6 lg:px-10 pt-3 sm:pt-5 pb-20 sm:pb-24 grid-cols-1 gap-6 lg:gap-10'
+          }`}
+        >
         {/* Left Column: Vinyl Stage + Track Info + Transport Controls */}
         <section
           className={`relative flex flex-col items-center justify-center min-h-0 ${
@@ -929,6 +930,7 @@ export const PlayerPage: React.FC = () => {
             />
           </section>
         )}
+        </div>
       </div>
 
       {/* Bottom Full-Width Liquid Wave Visualizer */}
