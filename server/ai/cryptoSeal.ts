@@ -3,10 +3,6 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
 
 export function isServerlessRuntime(): boolean {
   return Boolean(
@@ -21,7 +17,7 @@ export function getCacheDir(): string {
   if (isServerlessRuntime()) {
     return path.join(os.tmpdir(), 'lumina-music-cache');
   }
-  return path.resolve(__dirname, '../../.cache');
+  return path.resolve(process.cwd(), '.cache');
 }
 
 let cachedMasterKey: Buffer | null = null;
@@ -40,12 +36,11 @@ export async function getVaultMasterKey(): Promise<Buffer> {
   }
 
   // In Netlify / Serverless without explicit LUMINA_VAULT_SECRET, derive a site-scoped
-  // deterministic key so sealed tokens stay valid across cold starts on the same site.
+  // deterministic key so sealed tokens stay valid across cold starts and deploys.
   if (isServerlessRuntime()) {
     const siteSeed =
       process.env.SITE_ID ||
       process.env.NETLIFY_SITE_ID ||
-      process.env.URL ||
       process.env.GEMINI_API_KEY ||
       'lumina-serverless-site-default';
     cachedMasterKey = deriveDeterministicKey(siteSeed);

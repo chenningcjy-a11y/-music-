@@ -186,6 +186,36 @@ export async function fetchRuntimeCapabilities(): Promise<RuntimeCapabilities> {
   };
 }
 
+async function parseJsonResponse<T>(
+  res: Response,
+  fallbackError: string
+): Promise<T> {
+  const rawText = await res.text().catch(() => '');
+  let parsed: (T & { error?: string }) | null = null;
+  if (rawText.trim()) {
+    try {
+      parsed = JSON.parse(rawText) as T & { error?: string };
+    } catch {
+      parsed = null;
+    }
+  }
+  if (!res.ok) {
+    if (parsed && typeof parsed.error === 'string' && parsed.error) {
+      throw new Error(parsed.error);
+    }
+    const looksHtml = /<!doctype|<html/i.test(rawText);
+    throw new Error(
+      looksHtml
+        ? `${fallbackError}（HTTP ${res.status}：后端函数未就绪或返回了 HTML 页面，请确认 Netlify Functions 已同步最新代码并重新部署）`
+        : `${fallbackError} (HTTP ${res.status})`
+    );
+  }
+  if (!parsed) {
+    throw new Error(`${fallbackError}（服务端返回格式无效，请检查后端 / Netlify Functions 日志）`);
+  }
+  return parsed;
+}
+
 export async function fetchProviders(options?: {
   skipHydrate?: boolean;
 }): Promise<{
@@ -210,15 +240,13 @@ export async function fetchProviders(options?: {
       })
     : await fetch('/api/ai/providers', { headers });
 
-  if (!res.ok) {
-    throw new Error(`加载 AI 服务配置失败 (${res.status})`);
-  }
-  const data = (await res.json()) as {
+  const data = await parseJsonResponse<{
     defaultProviderId: string | null;
     providers: AiProviderConfig[];
     runtime?: string;
     securityMode: string;
-  };
+  }>(res, '加载 AI 服务配置失败');
+
   await persistProviderSnapshotPatch({
     defaultProviderId: data.defaultProviderId,
     providers: data.providers,
@@ -239,7 +267,11 @@ export async function saveProvider(payload: {
   maxRequestsPerDay?: number;
   customHeadersJson?: string;
   setAsDefault?: boolean;
-}): Promise<{ defaultProviderId: string | null; provider: AiProviderConfig }> {
+}): Promise<{
+  defaultProviderId: string | null;
+  provider: AiProviderConfig;
+  providers?: AiProviderConfig[];
+}> {
   const snap = await getVaultSnapshotForRequest();
   const headers = await getVaultHeaders();
   const res = await fetch('/api/ai/providers', {
@@ -247,11 +279,29 @@ export async function saveProvider(payload: {
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ ...payload, providerSnapshot: snap }),
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.error || '保存服务商失败');
-  }
-  await fetchProviders().catch(() => {});
+  const json = await parseJsonResponse<{
+    defaultProviderId: string | null;
+    provider: AiProviderConfig;
+    providers?: AiProviderConfig[];
+  }>(res, '保存 AI 服务商失败');
+
+  // Persist sealed provider snapshot immediately before any subsequent GET so stateless
+  // serverless containers stay synchronized across cold starts and multiple instances.
+  const nextProviders = Array.isArray(json.providers)
+    ? json.providers
+    : (() => {
+        const prevList = snap?.providers ? [...snap.providers] : [];
+        const idx = prevList.findIndex((p) => p.id === json.provider.id);
+        if (idx >= 0) prevList[idx] = json.provider;
+        else prevList.push(json.provider);
+        return prevList;
+      })();
+
+  await persistProviderSnapshotPatch({
+    defaultProviderId: json.defaultProviderId,
+    providers: nextProviders,
+  });
+
   return json;
 }
 
@@ -261,10 +311,7 @@ export async function deleteProviderById(id: string): Promise<void> {
     method: 'DELETE',
     headers,
   });
-  if (!res.ok) {
-    const json = await res.json().catch(() => ({}));
-    throw new Error(json.error || '删除服务商失败');
-  }
+  await parseJsonResponse<{ ok: boolean }>(res, '删除服务商失败');
   const prev = await getVaultSnapshotForRequest();
   if (prev) {
     await persistProviderSnapshotPatch({
@@ -279,11 +326,16 @@ export async function deleteProviderKey(id: string): Promise<AiProviderConfig> {
     method: 'DELETE',
     headers,
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.error || '删除 API Key 失败');
+  const json = await parseJsonResponse<{ provider: AiProviderConfig }>(
+    res,
+    '删除 API Key 失败'
+  );
+  const prev = await getVaultSnapshotForRequest();
+  if (prev && json.provider) {
+    await persistProviderSnapshotPatch({
+      providers: prev.providers.map((p) => (p.id === id ? json.provider : p)),
+    });
   }
-  await fetchProviders().catch(() => {});
   return json.provider;
 }
 
@@ -293,10 +345,7 @@ export async function setDefaultProviderById(id: string): Promise<void> {
     method: 'POST',
     headers,
   });
-  if (!res.ok) {
-    const json = await res.json().catch(() => ({}));
-    throw new Error(json.error || '切换默认服务商失败');
-  }
+  await parseJsonResponse<{ ok: boolean }>(res, '切换默认服务商失败');
   await persistProviderSnapshotPatch({ defaultProviderId: id });
 }
 
@@ -310,8 +359,14 @@ export async function testProviderApi(
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ providerSnapshot: snap }),
   });
-  const json = await res.json();
-  await fetchProviders().catch(() => {});
+  const json = await parseJsonResponse<
+    DetailedTestConnectionResult & { provider?: AiProviderConfig }
+  >(res, '测试 API 连接失败');
+  if (json.provider && snap) {
+    await persistProviderSnapshotPatch({
+      providers: snap.providers.map((p) => (p.id === id ? json.provider! : p)),
+    });
+  }
   return json;
 }
 
@@ -327,11 +382,18 @@ export async function fetchProviderModels(id: string): Promise<{
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ providerSnapshot: snap }),
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.error || '获取模型列表失败');
+  const json = await parseJsonResponse<{
+    models: DiscoveredModel[];
+    supportsModelListing: boolean;
+    message?: string;
+  }>(res, '获取模型列表失败');
+  if (snap && json.models?.length > 0) {
+    await persistProviderSnapshotPatch({
+      providers: snap.providers.map((p) =>
+        p.id === id ? { ...p, availableModels: json.models.map((m) => m.id) } : p
+      ),
+    });
   }
-  await fetchProviders().catch(() => {});
   return json;
 }
 
@@ -341,13 +403,10 @@ export async function fetchStemServices(): Promise<{
 }> {
   const headers = await getVaultHeaders();
   const res = await fetch('/api/ai/stem-services', { headers });
-  if (!res.ok) {
-    throw new Error('加载音源分离服务配置失败');
-  }
-  const data = (await res.json()) as {
+  const data = await parseJsonResponse<{
     activeStemServiceId: string | null;
     services: StemServiceConfig[];
-  };
+  }>(res, '加载音源分离服务配置失败');
   await persistProviderSnapshotPatch({
     activeStemServiceId: data.activeStemServiceId,
     stemServices: data.services,
@@ -367,17 +426,25 @@ export async function saveStemService(payload: {
   timeoutMs?: number;
   setActive?: boolean;
 }): Promise<{ activeStemServiceId: string | null; service: StemServiceConfig }> {
+  const snap = await getVaultSnapshotForRequest();
   const headers = await getVaultHeaders();
   const res = await fetch('/api/ai/stem-services', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify(payload),
   });
-  const json = await res.json();
-  if (!res.ok) {
-    throw new Error(json.error || '保存音源分离服务失败');
-  }
-  await fetchStemServices().catch(() => {});
+  const json = await parseJsonResponse<{
+    activeStemServiceId: string | null;
+    service: StemServiceConfig;
+  }>(res, '保存音源分离服务失败');
+  const prevList = snap?.stemServices ? [...snap.stemServices] : [];
+  const idx = prevList.findIndex((s) => s.id === json.service.id);
+  if (idx >= 0) prevList[idx] = json.service;
+  else prevList.push(json.service);
+  await persistProviderSnapshotPatch({
+    activeStemServiceId: json.activeStemServiceId,
+    stemServices: prevList,
+  });
   return json;
 }
 
@@ -388,10 +455,7 @@ export async function setActiveStemServiceId(serviceId: string | null): Promise<
     headers: { 'Content-Type': 'application/json', ...headers },
     body: JSON.stringify({ serviceId }),
   });
-  if (!res.ok) {
-    const json = await res.json().catch(() => ({}));
-    throw new Error(json.error || '切换音源分离服务失败');
-  }
+  await parseJsonResponse<{ ok: boolean }>(res, '切换音源分离服务失败');
   await persistProviderSnapshotPatch({ activeStemServiceId: serviceId });
 }
 
@@ -401,10 +465,7 @@ export async function deleteStemServiceById(id: string): Promise<void> {
     method: 'DELETE',
     headers,
   });
-  if (!res.ok) {
-    const json = await res.json().catch(() => ({}));
-    throw new Error(json.error || '删除分离服务失败');
-  }
+  await parseJsonResponse<{ ok: boolean }>(res, '删除分离服务失败');
 }
 
 export async function testStemServiceById(id: string): Promise<{

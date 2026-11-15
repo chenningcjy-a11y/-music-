@@ -249,7 +249,8 @@ export function createAiRouter(): Router {
             : undefined,
         setAsDefault: Boolean(body.setAsDefault),
       });
-      res.json(result);
+      const list = await listPublicProviders();
+      res.json({ ...result, providers: list.providers });
     } catch (err) {
       res.status(500).json({
         error: err instanceof Error ? err.message : '保存 AI 服务商配置失败',

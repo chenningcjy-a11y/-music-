@@ -252,10 +252,12 @@ export async function handleApiWebRequest(req: Request): Promise<Response> {
   }
 
   if (method === 'POST' && pathname === '/ai/providers') {
-    if (headerSnapshot) {
-      await hydrateVaultFromClientSnapshot(headerSnapshot);
-    }
     const body = await readJsonBody(req);
+    const snapshot =
+      (body.providerSnapshot as ClientVaultSnapshot | undefined) || headerSnapshot;
+    if (snapshot) {
+      await hydrateVaultFromClientSnapshot(snapshot);
+    }
     if (!body.kind || !body.baseUrl) {
       return jsonResponse({ error: '请填写服务商类型与 API Base URL' }, 400);
     }
@@ -276,7 +278,8 @@ export async function handleApiWebRequest(req: Request): Promise<Response> {
         typeof body.customHeadersJson === 'string' ? body.customHeadersJson : undefined,
       setAsDefault: Boolean(body.setAsDefault),
     });
-    return jsonResponse(result);
+    const list = await listPublicProviders();
+    return jsonResponse({ ...result, providers: list.providers });
   }
 
   const providerMatch = pathname.match(/^\/ai\/providers\/([^/]+)(?:\/(key|default|test|models))?$/);
