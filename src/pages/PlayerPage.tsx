@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import {
   FileMusic,
+  Film,
   Heart,
   ListMusic,
   Maximize2,
@@ -23,6 +24,7 @@ import { FullscreenThreeLineLyrics } from '../components/lyrics/FullscreenThreeL
 import { LyricsEditorModal } from '../components/lyrics/LyricsEditorModal';
 import { LyricsSearchModal } from '../components/lyrics/LyricsSearchModal';
 import { LyricsView } from '../components/lyrics/LyricsView';
+import { MvSettingsModal } from '../components/mv/MvSettingsModal';
 import { AlbumVinylStage } from '../components/visualizers/AlbumVinylStage';
 import { FullscreenCoverFluidStage } from '../components/visualizers/FullscreenCoverFluidStage';
 import { LiquidWaveCanvas } from '../components/visualizers/LiquidWaveCanvas';
@@ -153,6 +155,9 @@ export const PlayerPage: React.FC = () => {
     isTranslatingLyrics,
     updateLyricsOffset,
     showToast,
+    currentTrackMv,
+    mvRuntimeStatus,
+    triggerMvRetry,
   } = useMusic();
 
   const {
@@ -167,6 +172,7 @@ export const PlayerPage: React.FC = () => {
   const [searchOpen, setSearchOpen] = useState(false);
   const [editorOpen, setEditorOpen] = useState(false);
   const [vocalMixerOpen, setVocalMixerOpen] = useState(false);
+  const [mvModalOpen, setMvModalOpen] = useState(false);
   const [showExitHint, setShowExitHint] = useState(false);
   const idleTimerRef = useRef<number | null>(null);
   const fullscreenRootRef = useRef<HTMLDivElement | null>(null);
@@ -324,25 +330,84 @@ export const PlayerPage: React.FC = () => {
   const progressPct =
     effectiveDuration > 0 ? Math.min(100, (currentTime / effectiveDuration) * 100) : 0;
 
+  const mvAlertPill =
+    currentTrack &&
+    (mvRuntimeStatus.state === 'autoplay_blocked' ||
+      mvRuntimeStatus.state === 'error' ||
+      mvRuntimeStatus.state === 'link_broken') ? (
+      <div className="flex items-center justify-center gap-2 px-3 py-1.5 rounded-2xl bg-black/65 backdrop-blur-xl border border-white/15 text-xs text-white shadow-xl">
+        <span className="truncate max-w-[230px]">
+          {mvRuntimeStatus.state === 'autoplay_blocked'
+            ? '视频自动播放受限'
+            : mvRuntimeStatus.message || 'MV 播放异常'}
+        </span>
+        {mvRuntimeStatus.state === 'autoplay_blocked' ? (
+          <button
+            type="button"
+            onClick={triggerMvRetry}
+            className="px-2.5 py-1 rounded-xl text-[11px] font-semibold text-white cursor-pointer shrink-0"
+            style={{ backgroundColor: activePalette.primary }}
+          >
+            启动 MV 画面
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setMvModalOpen(true)}
+            className="px-2.5 py-1 rounded-xl bg-white/15 hover:bg-white/25 text-[11px] font-semibold text-white cursor-pointer shrink-0"
+          >
+            更换 MV
+          </button>
+        )}
+      </div>
+    ) : null;
+
   if (isFullscreen) {
     return (
       <div
         ref={fullscreenRootRef}
         className="relative h-full w-full overflow-hidden"
       >
-        {/* Transient exit control revealed briefly on pointer/touch activity */}
-        <button
-          type="button"
-          onClick={exitFullscreen}
-          aria-label="退出全屏"
-          title="退出全屏 (ESC)"
-          className={`fixed top-5 right-5 z-40 min-h-[40px] px-3.5 py-2 rounded-2xl bg-black/38 hover:bg-black/58 backdrop-blur-xl border border-white/15 text-xs font-medium text-white/85 hover:text-white flex items-center gap-1.5 shadow-xl transition-opacity duration-300 cursor-pointer ${
+        {/* Transient top-right controls revealed briefly on pointer/touch activity */}
+        <div
+          className={`fixed top-5 right-5 z-40 flex items-center gap-2 transition-opacity duration-300 ${
             showExitHint ? 'opacity-100' : 'opacity-0 pointer-events-none'
           }`}
         >
-          <Minimize2 className="w-4 h-4" />
-          <span>退出全屏</span>
-        </button>
+          <button
+            type="button"
+            onClick={() => setMvModalOpen(true)}
+            aria-label="MV 背景"
+            title="MV 背景设置与音画同步"
+            className="min-h-[40px] px-3.5 py-2 rounded-2xl bg-black/38 hover:bg-black/58 backdrop-blur-xl border border-white/15 text-xs font-medium text-white/85 hover:text-white flex items-center gap-1.5 shadow-xl cursor-pointer"
+            style={
+              currentTrackMv?.enabled
+                ? { borderColor: `${activePalette.primary}90`, color: '#fff' }
+                : undefined
+            }
+          >
+            <Film
+              className="w-4 h-4"
+              style={currentTrackMv?.enabled ? { color: activePalette.primary } : undefined}
+            />
+            <span>MV 背景</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={exitFullscreen}
+            aria-label="退出全屏"
+            title="退出全屏 (ESC)"
+            className="min-h-[40px] px-3.5 py-2 rounded-2xl bg-black/38 hover:bg-black/58 backdrop-blur-xl border border-white/15 text-xs font-medium text-white/85 hover:text-white flex items-center gap-1.5 shadow-xl cursor-pointer"
+          >
+            <Minimize2 className="w-4 h-4" />
+            <span>退出全屏</span>
+          </button>
+        </div>
+
+        {mvAlertPill && (
+          <div className="fixed top-5 left-5 z-40">{mvAlertPill}</div>
+        )}
 
         {/* Strict 50 / 50 Left-Right Split Layout */}
         <div className="relative z-10 h-full w-full grid grid-cols-1 md:grid-cols-2">
@@ -481,6 +546,12 @@ export const PlayerPage: React.FC = () => {
             />
           </section>
         </div>
+
+        <MvSettingsModal
+          open={mvModalOpen}
+          onClose={() => setMvModalOpen(false)}
+          palette={activePalette}
+        />
       </div>
     );
   }
@@ -542,6 +613,8 @@ export const PlayerPage: React.FC = () => {
                 {currentTrack.bitrate ? ` · ${formatBitrate(currentTrack.bitrate)}` : ''}
               </p>
             )}
+
+            {mvAlertPill && <div className="pt-1 flex justify-center">{mvAlertPill}</div>}
           </div>
 
           {/* Control Deck */}
@@ -740,6 +813,22 @@ export const PlayerPage: React.FC = () => {
                       }}
                     >
                       <Mic2 className="w-[18px] h-[18px]" />
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setMvModalOpen(true)}
+                      title="MV 背景与音画同步"
+                      aria-label="MV 背景"
+                      className="min-w-[40px] min-h-[40px] px-2 flex items-center justify-center gap-1 rounded-xl hover:bg-white/10 transition-colors cursor-pointer"
+                      style={{
+                        color: currentTrackMv?.enabled
+                          ? activePalette.primary
+                          : 'rgba(255,255,255,0.65)',
+                      }}
+                    >
+                      <Film className="w-[18px] h-[18px]" />
+                      <span className="hidden xl:inline text-[11px] font-medium">MV 背景</span>
                     </button>
 
                     <button
@@ -971,6 +1060,12 @@ export const PlayerPage: React.FC = () => {
         onRestoreInitialTranslation={async () => {
           if (currentTrack) await restoreOriginalAiTranslation(currentTrack.id);
         }}
+      />
+
+      <MvSettingsModal
+        open={mvModalOpen}
+        onClose={() => setMvModalOpen(false)}
+        palette={activePalette}
       />
     </div>
   );

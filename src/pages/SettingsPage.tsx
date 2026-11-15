@@ -127,6 +127,7 @@ export const SettingsPage: React.FC = () => {
   const [confirmReset, setConfirmReset] = useState(false);
   const [backupBusy, setBackupBusy] = useState(false);
   const [backupPassphrase, setBackupPassphrase] = useState('');
+  const [includeMvVideosInBackup, setIncludeMvVideosInBackup] = useState(false);
   const [backupNotice, setBackupNotice] = useState<string | null>(null);
   const importInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -143,7 +144,10 @@ export const SettingsPage: React.FC = () => {
     setBackupBusy(true);
     setBackupNotice(null);
     try {
-      const { bundle, filename } = await exportFullLuminaBackup(backupPassphrase);
+      const { bundle, filename } = await exportFullLuminaBackup({
+        passphrase: backupPassphrase,
+        includeMvVideos: includeMvVideosInBackup,
+      });
       const json = JSON.stringify(bundle);
       const blob = new Blob([json], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
@@ -157,7 +161,13 @@ export const SettingsPage: React.FC = () => {
       const secretNote = bundle.encryptedSecrets
         ? `已使用 PBKDF2 + AES-256-GCM 加密打包 ${bundle.encryptedSecrets.keyCount} 个 API 密钥`
         : '不含 API 密钥（仅导出脱敏配置元数据）';
-      const msg = `已导出完整备份：${bundle.tracks.length} 首歌曲、${bundle.stems.length} 组分离音轨、${bundle.aiTasks.length} 条任务记录（${secretNote}）`;
+      const mvCount = bundle.mvConfigs?.length || 0;
+      const mvVideoCount = bundle.mvVideos?.length || 0;
+      const mvNote =
+        mvCount > 0
+          ? `、${mvCount} 项 MV 配置${mvVideoCount > 0 ? `（含 ${mvVideoCount} 个本地视频）` : ''}`
+          : '';
+      const msg = `已导出完整备份：${bundle.tracks.length} 首歌曲、${bundle.stems.length} 组分离音轨、${bundle.aiTasks.length} 条任务记录${mvNote}（${secretNote}）`;
       setBackupNotice(msg);
       showToast('完整备份已导出');
     } catch (err) {
@@ -193,15 +203,30 @@ export const SettingsPage: React.FC = () => {
         `${summary.stemsRestored} 组分离音轨`,
         `${summary.tasksRestored} 条任务记录`,
       ];
+      if (summary.mvConfigsRestored > 0) {
+        parts.push(
+          `${summary.mvConfigsRestored} 项 MV 配置${
+            summary.mvVideosRestored > 0 ? `（含 ${summary.mvVideosRestored} 个本地视频）` : ''
+          }`
+        );
+      }
       if (summary.providersRestored > 0 || summary.keysRestored > 0) {
         parts.push(
           `${summary.providersRestored} 个 AI 服务配置（解密恢复 ${summary.keysRestored} 个密钥）`
         );
       }
+      const notes: string[] = [];
+      if (summary.tasksNormalizedToResubmit > 0) {
+        notes.push(`${summary.tasksNormalizedToResubmit} 个原进行中任务已标记为「等待重新提交」`);
+      }
+      if (summary.mvBrokenLinks > 0) {
+        notes.push(`${summary.mvBrokenLinks} 条在线 MV 链接失效，已保留歌曲与同步参数并暂停背景播放`);
+      }
+      if (summary.mvMissingLocalVideos > 0) {
+        notes.push(`${summary.mvMissingLocalVideos} 个本地 MV 未包含视频正文，请重新上传视频或切换网页 MV`);
+      }
       const msg = `已恢复 ${parts.join('、')}${
-        summary.tasksNormalizedToResubmit > 0
-          ? `（其中 ${summary.tasksNormalizedToResubmit} 个原进行中任务已标记为「等待重新提交」）`
-          : ''
+        notes.length > 0 ? `（${notes.join('；')}）` : ''
       }`;
       setBackupNotice(msg);
       showToast('备份恢复完成');
@@ -582,8 +607,19 @@ export const SettingsPage: React.FC = () => {
             className="w-full px-3.5 py-2.5 rounded-xl bg-white/8 border border-white/12 text-xs text-white placeholder:text-white/40 focus:outline-none focus:border-white/30"
           />
           <p className="text-[11px] text-white/50 leading-relaxed">
-            明文 API Key 永远不会写入备份 JSON；导入含加密密钥的备份时，请先在此填入导出时设置的口令。
+            明文 API Key 永远不会写入备份 JSON；导入含加密密钥的备份时，请先在此填入导出时设置的口令。默认自动备份每首歌曲的 MV 来源、同步偏移与画面参数。
           </p>
+          <label className="flex items-center gap-2.5 pt-1 text-xs text-white/80 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={includeMvVideosInBackup}
+              onChange={(e) => setIncludeMvVideosInBackup(e.target.checked)}
+              className="accent-rose-500 w-4 h-4 shrink-0"
+            />
+            <span>
+              完整备份包含本地上传的 MV 视频正文（体积较大，不勾选则仅保留 MV 设置与同步位置）
+            </span>
+          </label>
         </div>
 
         <div className="flex flex-wrap items-center gap-3 pt-2">

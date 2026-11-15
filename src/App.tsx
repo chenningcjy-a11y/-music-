@@ -14,6 +14,7 @@ import {
   SlidersHorizontal,
 } from 'lucide-react';
 import { ErrorBoundary } from './components/ErrorBoundary';
+import { MvBackgroundStage } from './components/mv/MvBackgroundStage';
 import { QueueDrawer } from './components/QueueDrawer';
 import { DynamicBackground } from './components/visualizers/DynamicBackground';
 import { AiProvider } from './context/AiContext';
@@ -85,6 +86,9 @@ const LuminaShell: React.FC = () => {
         reducedMotion={Boolean(personalization.reducedMotion)}
         isFullscreen={isFullscreen}
       />
+
+      {/* Synchronized Per-Song MV Background Layer (only active when MV enabled on PlayerPage) */}
+      <MvBackgroundStage />
 
       {/* Desktop & Landscape Tablet Left Glass Navigation Rail */}
       {!isFullscreen && (

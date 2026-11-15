@@ -12,6 +12,7 @@ import {
   LyricsTranslationHttpError,
   searchOnlineLyricsDetailed,
 } from './server/ai/lyricsCore.ts';
+import { resolveOnlineMvUrl, searchOnlineMvs } from './server/ai/mvSearch.ts';
 import {
   cancelServerStemJob,
   deleteServerStemJob,
@@ -240,6 +241,49 @@ async function startServer() {
     } catch (err) {
       res.status(502).json({
         error: err instanceof Error ? err.message : '封面代理失败',
+      });
+    }
+  });
+
+  // Online MV search & compliant URL validation
+  app.get('/api/mv/search', async (req, res) => {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    const title = typeof req.query.title === 'string' ? req.query.title.trim() : '';
+    const artist = typeof req.query.artist === 'string' ? req.query.artist.trim() : '';
+    const album = typeof req.query.album === 'string' ? req.query.album.trim() : '';
+    const durationRaw =
+      typeof req.query.duration === 'string' ? Number(req.query.duration) : 0;
+    const duration =
+      Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : undefined;
+
+    if (!q && !title && !artist) {
+      res.status(400).json({ error: '请输入歌曲名称或 MV 关键词进行搜索' });
+      return;
+    }
+
+    try {
+      const candidates = await searchOnlineMvs({ q, title, artist, album, duration });
+      res.setHeader('Cache-Control', 'public, max-age=120');
+      res.json({ candidates });
+    } catch (err) {
+      res.status(502).json({
+        error: err instanceof Error ? err.message : '在线 MV 搜索服务暂时不可用',
+      });
+    }
+  });
+
+  app.post('/api/mv/resolve-url', async (req, res) => {
+    const rawUrl = typeof req.body?.url === 'string' ? req.body.url.trim() : '';
+    if (!rawUrl) {
+      res.status(400).json({ error: '请输入要解析的视频链接' });
+      return;
+    }
+    try {
+      const candidate = await resolveOnlineMvUrl(rawUrl);
+      res.json({ candidate });
+    } catch (err) {
+      res.status(400).json({
+        error: err instanceof Error ? err.message : '解析视频链接失败',
       });
     }
   });

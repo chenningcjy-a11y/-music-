@@ -32,6 +32,7 @@ import {
   LyricsTranslationHttpError,
   searchOnlineLyricsDetailed,
 } from './lyricsCore.ts';
+import { resolveOnlineMvUrl, searchOnlineMvs } from './mvSearch.ts';
 import { callProviderTextCompletion } from './providerClient.ts';
 
 function jsonResponse(
@@ -153,6 +154,49 @@ export async function handleApiWebRequest(req: Request): Promise<Response> {
       return jsonResponse(
         { error: err instanceof Error ? err.message : '封面代理失败' },
         502
+      );
+    }
+  }
+
+  // Online MV Search & URL Resolution
+  if (method === 'GET' && pathname === '/mv/search') {
+    const q = (url.searchParams.get('q') || '').trim();
+    const title = (url.searchParams.get('title') || '').trim();
+    const artist = (url.searchParams.get('artist') || '').trim();
+    const album = (url.searchParams.get('album') || '').trim();
+    const durationRaw = Number(url.searchParams.get('duration') || '0');
+    const duration =
+      Number.isFinite(durationRaw) && durationRaw > 0 ? durationRaw : undefined;
+
+    if (!q && !title && !artist) {
+      return jsonResponse({ error: '请输入歌曲名称或 MV 关键词进行搜索' }, 400);
+    }
+    try {
+      const candidates = await searchOnlineMvs({ q, title, artist, album, duration });
+      return jsonResponse({ candidates }, 200, {
+        'Cache-Control': 'public, max-age=120',
+      });
+    } catch (err) {
+      return jsonResponse(
+        { error: err instanceof Error ? err.message : '在线 MV 搜索服务暂时不可用' },
+        502
+      );
+    }
+  }
+
+  if (method === 'POST' && pathname === '/mv/resolve-url') {
+    const body = await readJsonBody(req);
+    const rawUrl = typeof body.url === 'string' ? body.url.trim() : '';
+    if (!rawUrl) {
+      return jsonResponse({ error: '请输入要解析的视频链接' }, 400);
+    }
+    try {
+      const candidate = await resolveOnlineMvUrl(rawUrl);
+      return jsonResponse({ candidate });
+    } catch (err) {
+      return jsonResponse(
+        { error: err instanceof Error ? err.message : '解析视频链接失败' },
+        400
       );
     }
   }

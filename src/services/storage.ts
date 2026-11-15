@@ -5,6 +5,7 @@ import {
   PlaybackPrefs,
   Playlist,
   TrackMetadata,
+  TrackMvConfig,
   TrackStemsMeta,
   TrackStemsRecord,
 } from '../types/music';
@@ -15,7 +16,7 @@ import {
 } from '../utils/constants';
 
 const DB_NAME = 'lumina-music-db';
-const DB_VERSION = 3;
+const DB_VERSION = 4;
 
 const STORE_TRACKS = 'tracks';
 const STORE_BLOBS = 'audioBlobs';
@@ -24,6 +25,8 @@ const STORE_SETTINGS = 'settings';
 const STORE_STEMS = 'stems';
 const STORE_MODELS = 'models';
 const STORE_AI_TASKS = 'ai_tasks';
+const STORE_MV_CONFIGS = 'mvConfigs';
+const STORE_MV_BLOBS = 'mvBlobs';
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
@@ -55,6 +58,12 @@ function openDatabase(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains(STORE_AI_TASKS)) {
         db.createObjectStore(STORE_AI_TASKS, { keyPath: 'id' });
+      }
+      if (!db.objectStoreNames.contains(STORE_MV_CONFIGS)) {
+        db.createObjectStore(STORE_MV_CONFIGS, { keyPath: 'songId' });
+      }
+      if (!db.objectStoreNames.contains(STORE_MV_BLOBS)) {
+        db.createObjectStore(STORE_MV_BLOBS);
       }
     };
 
@@ -116,11 +125,19 @@ export async function getAudioBlob(trackId: string): Promise<Blob | undefined> {
 
 export async function deleteTrackById(trackId: string): Promise<void> {
   const db = await openDatabase();
+  const existingMv = await getMvConfig(trackId).catch(() => undefined);
   return new Promise((resolve, reject) => {
-    const tx = db.transaction([STORE_TRACKS, STORE_BLOBS, STORE_STEMS], 'readwrite');
+    const tx = db.transaction(
+      [STORE_TRACKS, STORE_BLOBS, STORE_STEMS, STORE_MV_CONFIGS, STORE_MV_BLOBS],
+      'readwrite'
+    );
     tx.objectStore(STORE_TRACKS).delete(trackId);
     tx.objectStore(STORE_BLOBS).delete(trackId);
     tx.objectStore(STORE_STEMS).delete(trackId);
+    tx.objectStore(STORE_MV_CONFIGS).delete(trackId);
+    if (existingMv?.localVideoId) {
+      tx.objectStore(STORE_MV_BLOBS).delete(existingMv.localVideoId);
+    }
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -287,13 +304,22 @@ export async function clearAllMusicData(): Promise<void> {
   const db = await openDatabase();
   return new Promise((resolve, reject) => {
     const tx = db.transaction(
-      [STORE_TRACKS, STORE_BLOBS, STORE_PLAYLISTS, STORE_STEMS],
+      [
+        STORE_TRACKS,
+        STORE_BLOBS,
+        STORE_PLAYLISTS,
+        STORE_STEMS,
+        STORE_MV_CONFIGS,
+        STORE_MV_BLOBS,
+      ],
       'readwrite'
     );
     tx.objectStore(STORE_TRACKS).clear();
     tx.objectStore(STORE_BLOBS).clear();
     tx.objectStore(STORE_PLAYLISTS).clear();
     tx.objectStore(STORE_STEMS).clear();
+    tx.objectStore(STORE_MV_CONFIGS).clear();
+    tx.objectStore(STORE_MV_BLOBS).clear();
     tx.oncomplete = () => resolve();
     tx.onerror = () => reject(tx.error);
   });
@@ -381,5 +407,96 @@ export async function saveAiVaultSnapshot<T>(snapshot: T): Promise<void> {
     // Non-fatal
   }
 }
+
+// ---------------------------------------------------------------------------
+// Per-Song MV Config & Disk-Backed Blob Persistence
+// ---------------------------------------------------------------------------
+
+export async function getAllMvConfigs(): Promise<TrackMvConfig[]> {
+  try {
+    const db = await openDatabase();
+    const tx = db.transaction(STORE_MV_CONFIGS, 'readonly');
+    return (await wrapRequest(tx.objectStore(STORE_MV_CONFIGS).getAll())) as TrackMvConfig[];
+  } catch {
+    return [];
+  }
+}
+
+export async function getMvConfig(songId: string): Promise<TrackMvConfig | undefined> {
+  const db = await openDatabase();
+  const tx = db.transaction(STORE_MV_CONFIGS, 'readonly');
+  return wrapRequest(tx.objectStore(STORE_MV_CONFIGS).get(songId)) as Promise<
+    TrackMvConfig | undefined
+  >;
+}
+
+export async function saveMvConfig(config: TrackMvConfig): Promise<void> {
+  const db = await openDatabase();
+  const tx = db.transaction(STORE_MV_CONFIGS, 'readwrite');
+  await wrapRequest(tx.objectStore(STORE_MV_CONFIGS).put(config));
+}
+
+export async function saveMvVideoWithConfig(
+  config: TrackMvConfig,
+  videoBlob: Blob,
+  previousLocalVideoId?: string
+): Promise<void> {
+  const db = await openDatabase();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_MV_CONFIGS, STORE_MV_BLOBS], 'readwrite');
+    if (
+      previousLocalVideoId &&
+      previousLocalVideoId !== config.localVideoId
+    ) {
+      tx.objectStore(STORE_MV_BLOBS).delete(previousLocalVideoId);
+    }
+    if (config.localVideoId) {
+      tx.objectStore(STORE_MV_BLOBS).put(videoBlob, config.localVideoId);
+    }
+    tx.objectStore(STORE_MV_CONFIGS).put(config);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => {
+      const err = tx.error;
+      if (err && err.name === 'QuotaExceededError') {
+        reject(new Error('浏览器本地存储配额不足，无法保存该视频，请清理部分数据或改用较小分辨率 MP4/WebM 视频。'));
+      } else {
+        reject(err || new Error('保存本地 MV 视频失败'));
+      }
+    };
+  });
+}
+
+export async function getMvBlob(localVideoId: string): Promise<Blob | undefined> {
+  try {
+    const db = await openDatabase();
+    const tx = db.transaction(STORE_MV_BLOBS, 'readonly');
+    return (await wrapRequest(tx.objectStore(STORE_MV_BLOBS).get(localVideoId))) as
+      | Blob
+      | undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+export async function deleteMvBlob(localVideoId: string): Promise<void> {
+  const db = await openDatabase();
+  const tx = db.transaction(STORE_MV_BLOBS, 'readwrite');
+  await wrapRequest(tx.objectStore(STORE_MV_BLOBS).delete(localVideoId));
+}
+
+export async function deleteMvConfigAndBlob(songId: string): Promise<void> {
+  const db = await openDatabase();
+  const existing = await getMvConfig(songId).catch(() => undefined);
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction([STORE_MV_CONFIGS, STORE_MV_BLOBS], 'readwrite');
+    tx.objectStore(STORE_MV_CONFIGS).delete(songId);
+    if (existing?.localVideoId) {
+      tx.objectStore(STORE_MV_BLOBS).delete(existing.localVideoId);
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+
 
 

@@ -12,9 +12,11 @@ import { isSupportedAudioFile, parseAudioFileToTrack } from '../services/audioMe
 import { getProxiedCoverUrl } from '../services/coverSearchService';
 import {
   clearAllMusicData,
+  deleteMvConfigAndBlob,
   deletePlaylistById,
   deleteTrackById,
   deleteTrackStems,
+  getAllMvConfigs,
   getAllPlaylists,
   getAllStemMetas,
   getAllTracks,
@@ -26,6 +28,8 @@ import {
   loadPlaybackPrefs,
   markDemoInitialized,
   saveAudioSettings,
+  saveMvConfig,
+  saveMvVideoWithConfig,
   savePersonalization,
   savePlaybackPrefs,
   savePlaylist,
@@ -33,9 +37,14 @@ import {
   updateTrackMetadata,
 } from '../services/storage';
 import {
+  DEFAULT_MV_VISUAL_SETTINGS,
+  probeLocalVideoFile,
+} from '../services/mvService';
+import {
   AudioDspSettings,
   LyricPairRecord,
   LyricTranslationStyle,
+  MvRuntimeStatus,
   NavPage,
   PersonalizationSettings,
   Playlist,
@@ -43,6 +52,7 @@ import {
   SeparationEngineMode,
   TrackColorPalette,
   TrackMetadata,
+  TrackMvConfig,
   TrackStemsMeta,
   TrackTranslationMeta,
 } from '../types/music';
@@ -204,6 +214,19 @@ interface MusicContextValue {
   pauseMainPlayer: () => void;
   removeTrackStems: (trackId: string) => Promise<void>;
   reloadAllLibraryData: () => Promise<void>;
+
+  // Per-song MV background & audio-video sync
+  mvConfigs: Record<string, TrackMvConfig>;
+  currentTrackMv: TrackMvConfig | null;
+  mvRuntimeStatus: MvRuntimeStatus;
+  setMvRuntimeStatus: (status: MvRuntimeStatus) => void;
+  mvRetrySignal: number;
+  triggerMvRetry: () => void;
+  saveTrackMvConfig: (config: TrackMvConfig) => Promise<void>;
+  uploadLocalMvForTrack: (trackId: string, file: File) => Promise<TrackMvConfig>;
+  removeTrackMv: (trackId: string) => Promise<void>;
+  toggleTrackMvEnabled: (trackId: string, enabled?: boolean) => Promise<void>;
+  markTrackMvLinkBroken: (trackId: string, broken: boolean) => Promise<void>;
 }
 
 const MusicContext = createContext<MusicContextValue | null>(null);
@@ -245,6 +268,15 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
   const [separationEngineMode, setSeparationEngineMode] =
     useState<SeparationEngineMode>('auto');
 
+  const [mvConfigs, setMvConfigs] = useState<Record<string, TrackMvConfig>>({});
+  const [mvRuntimeStatus, setMvRuntimeStatus] = useState<MvRuntimeStatus>({
+    state: 'inactive',
+    mvCurrentTime: 0,
+    mvDuration: 0,
+    driftSec: 0,
+  });
+  const [mvRetrySignal, setMvRetrySignal] = useState(0);
+
   const toastTimerRef = useRef<number | null>(null);
   const loadedTrackIdRef = useRef<string | null>(null);
 
@@ -264,6 +296,11 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
   const currentTrackStemMeta = useMemo(
     () => (currentTrackId ? stemMetas[currentTrackId] || null : null),
     [currentTrackId, stemMetas]
+  );
+
+  const currentTrackMv = useMemo(
+    () => (currentTrackId ? mvConfigs[currentTrackId] || null : null),
+    [currentTrackId, mvConfigs]
   );
 
   const activePalette = useMemo<TrackColorPalette>(() => {
@@ -473,9 +510,10 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
       }
 
       if (cancelled) return;
-      const [existingPlaylists, existingStemMetas] = await Promise.all([
+      const [existingPlaylists, existingStemMetas, existingMvConfigs] = await Promise.all([
         getAllPlaylists(),
         getAllStemMetas(),
+        getAllMvConfigs(),
       ]);
       if (cancelled) return;
 
@@ -484,9 +522,15 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
         metaMap[m.trackId] = m;
       }
 
+      const mvMap: Record<string, TrackMvConfig> = {};
+      for (const mv of existingMvConfigs) {
+        mvMap[mv.songId] = mv;
+      }
+
       setTracks(existingTracks);
       setPlaylists(existingPlaylists);
       setStemMetas(metaMap);
+      setMvConfigs(mvMap);
       setQueueIds(existingTracks.map((t) => t.id));
 
       const preferred =
@@ -716,6 +760,12 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
       await deleteTrackById(id);
       setTracks((prev) => prev.filter((t) => t.id !== id));
       setStemMetas((prev) => {
+        if (!prev[id]) return prev;
+        const copy = { ...prev };
+        delete copy[id];
+        return copy;
+      });
+      setMvConfigs((prev) => {
         if (!prev[id]) return prev;
         const copy = { ...prev };
         delete copy[id];
@@ -1021,6 +1071,7 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
     setTracks([]);
     setPlaylists([]);
     setStemMetas({});
+    setMvConfigs({});
     setQueueIds([]);
     showToast('本地曲库与播放列表已清空');
   }, [showToast]);
@@ -1205,15 +1256,23 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
   }, []);
 
   const reloadAllLibraryData = useCallback(async () => {
-    const [loadedAudio, loadedPers, loadedPrefs, allTracks, allPlaylists, allMetas] =
-      await Promise.all([
-        loadAudioSettings(),
-        loadPersonalization(),
-        loadPlaybackPrefs(),
-        getAllTracks(),
-        getAllPlaylists(),
-        getAllStemMetas(),
-      ]);
+    const [
+      loadedAudio,
+      loadedPers,
+      loadedPrefs,
+      allTracks,
+      allPlaylists,
+      allMetas,
+      allMvConfigs,
+    ] = await Promise.all([
+      loadAudioSettings(),
+      loadPersonalization(),
+      loadPlaybackPrefs(),
+      getAllTracks(),
+      getAllPlaylists(),
+      getAllStemMetas(),
+      getAllMvConfigs(),
+    ]);
 
     setAudioSettings(loadedAudio);
     audioEngine.applySettings(loadedAudio);
@@ -1229,9 +1288,15 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
       metaMap[m.trackId] = m;
     }
 
+    const mvMap: Record<string, TrackMvConfig> = {};
+    for (const mv of allMvConfigs) {
+      mvMap[mv.songId] = mv;
+    }
+
     setTracks(allTracks);
     setPlaylists(allPlaylists);
     setStemMetas(metaMap);
+    setMvConfigs(mvMap);
     setQueueIds(allTracks.map((t) => t.id));
 
     const preferred =
@@ -1256,6 +1321,129 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
       showToast('已清除该曲目的分离音轨缓存');
     },
     [showToast, updateAudioSettings]
+  );
+
+  const mvConfigsRef = useRef(mvConfigs);
+  mvConfigsRef.current = mvConfigs;
+
+  const triggerMvRetry = useCallback(() => {
+    setMvRetrySignal((n) => n + 1);
+  }, []);
+
+  const saveTrackMvConfig = useCallback(async (config: TrackMvConfig) => {
+    const cleanConfig: TrackMvConfig = {
+      ...config,
+      updatedAt: Date.now(),
+    };
+    await saveMvConfig(cleanConfig);
+    setMvConfigs((prev) => ({ ...prev, [cleanConfig.songId]: cleanConfig }));
+  }, []);
+
+  const uploadLocalMvForTrack = useCallback(
+    async (trackId: string, file: File): Promise<TrackMvConfig> => {
+      const probed = await probeLocalVideoFile(file);
+      const prev = mvConfigsRef.current[trackId];
+      const localVideoId =
+        typeof crypto !== 'undefined' && crypto.randomUUID
+          ? `mv-${trackId}-${crypto.randomUUID()}`
+          : `mv-${trackId}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+
+      const nextConfig: TrackMvConfig = {
+        songId: trackId,
+        enabled: true,
+        sourceType: 'local',
+        title: probed.fileName.replace(/\.[^.]+$/, '') || probed.fileName,
+        playableType: 'video',
+        localVideoId,
+        localFileName: probed.fileName,
+        localMimeType: probed.mimeType,
+        localFileSize: probed.fileSize,
+        localDuration: probed.duration,
+        localWidth: probed.width,
+        localHeight: probed.height,
+        syncOffsetSec: prev ? prev.syncOffsetSec : 0,
+        displayMode: prev?.displayMode || DEFAULT_MV_VISUAL_SETTINGS.displayMode,
+        scale: prev?.scale ?? DEFAULT_MV_VISUAL_SETTINGS.scale,
+        cropX: prev?.cropX ?? DEFAULT_MV_VISUAL_SETTINGS.cropX,
+        cropY: prev?.cropY ?? DEFAULT_MV_VISUAL_SETTINGS.cropY,
+        brightness: prev?.brightness ?? DEFAULT_MV_VISUAL_SETTINGS.brightness,
+        blurPx: prev?.blurPx ?? DEFAULT_MV_VISUAL_SETTINGS.blurPx,
+        overlayOpacity: prev?.overlayOpacity ?? DEFAULT_MV_VISUAL_SETTINGS.overlayOpacity,
+        endBehavior: prev?.endBehavior || DEFAULT_MV_VISUAL_SETTINGS.endBehavior,
+        linkBroken: false,
+        updatedAt: Date.now(),
+      };
+
+      await saveMvVideoWithConfig(nextConfig, file, prev?.localVideoId);
+      setMvConfigs((old) => ({ ...old, [trackId]: nextConfig }));
+      showToast(`已保存本地 MV「${probed.fileName}」并开启音画同步`);
+      return nextConfig;
+    },
+    [showToast]
+  );
+
+  const removeTrackMv = useCallback(
+    async (trackId: string) => {
+      await deleteMvConfigAndBlob(trackId);
+      setMvConfigs((prev) => {
+        if (!prev[trackId]) return prev;
+        const copy = { ...prev };
+        delete copy[trackId];
+        return copy;
+      });
+      if (loadedTrackIdRef.current === trackId) {
+        setMvRuntimeStatus({
+          state: 'inactive',
+          mvCurrentTime: 0,
+          mvDuration: 0,
+          driftSec: 0,
+        });
+      }
+      showToast('已清除当前歌曲的 MV 背景设置');
+    },
+    [showToast]
+  );
+
+  const toggleTrackMvEnabled = useCallback(
+    async (trackId: string, enabled?: boolean) => {
+      const existing = mvConfigsRef.current[trackId];
+      if (!existing) return;
+      const nextEnabled = enabled !== undefined ? enabled : !existing.enabled;
+      const updated: TrackMvConfig = {
+        ...existing,
+        enabled: nextEnabled,
+        linkBroken: nextEnabled ? false : existing.linkBroken,
+        updatedAt: Date.now(),
+      };
+      await saveMvConfig(updated);
+      setMvConfigs((prev) => ({ ...prev, [trackId]: updated }));
+      if (!nextEnabled && loadedTrackIdRef.current === trackId) {
+        setMvRuntimeStatus({
+          state: 'inactive',
+          mvCurrentTime: 0,
+          mvDuration: 0,
+          driftSec: 0,
+        });
+      }
+      showToast(nextEnabled ? '已开启 MV 背景模式' : '已关闭 MV 背景，恢复动态背景');
+    },
+    [showToast]
+  );
+
+  const markTrackMvLinkBroken = useCallback(
+    async (trackId: string, broken: boolean) => {
+      const existing = mvConfigsRef.current[trackId];
+      if (!existing || existing.linkBroken === broken) return;
+      const updated: TrackMvConfig = {
+        ...existing,
+        linkBroken: broken,
+        enabled: broken ? false : existing.enabled,
+        updatedAt: Date.now(),
+      };
+      await saveMvConfig(updated);
+      setMvConfigs((prev) => ({ ...prev, [trackId]: updated }));
+    },
+    []
   );
 
   // Sync native Fullscreen API & Escape key with immersive fullscreen mode
@@ -1397,6 +1585,17 @@ export const MusicProvider: React.FC<{ children: React.ReactNode }> = ({
     pauseMainPlayer,
     removeTrackStems,
     reloadAllLibraryData,
+    mvConfigs,
+    currentTrackMv,
+    mvRuntimeStatus,
+    setMvRuntimeStatus,
+    mvRetrySignal,
+    triggerMvRetry,
+    saveTrackMvConfig,
+    uploadLocalMvForTrack,
+    removeTrackMv,
+    toggleTrackMvEnabled,
+    markTrackMvLinkBroken,
   };
 
   return <MusicContext.Provider value={value}>{children}</MusicContext.Provider>;

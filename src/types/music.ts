@@ -214,3 +214,82 @@ export interface AudioAnalysisFrame {
   frequencies: Uint8Array;
   waveform: Uint8Array;
 }
+
+export type MvSourceType = 'online' | 'local';
+export type MvDisplayMode = 'cover' | 'contain' | 'custom';
+export type MvPlayableType = 'video' | 'embed' | 'external_only';
+export type MvEndBehavior = 'stop' | 'loop';
+
+export interface TrackMvConfig {
+  songId: string;
+  enabled: boolean;
+  sourceType: MvSourceType;
+  title: string;
+  artist?: string;
+  thumbnailUrl?: string;
+  sourceName?: string;
+  sourceUrl?: string;
+  playableType?: MvPlayableType;
+  playableUrl?: string;
+  embedProvider?: 'youtube' | 'vimeo' | 'dailymotion';
+  isPreviewClip?: boolean;
+  localVideoId?: string;
+  localFileName?: string;
+  localMimeType?: string;
+  localFileSize?: number;
+  localDuration?: number;
+  localWidth?: number;
+  localHeight?: number;
+  syncOffsetSec: number; // positive = MV ahead (mvTime = musicTime + syncOffsetSec), negative = MV delayed
+  displayMode: MvDisplayMode;
+  scale: number; // 1.0 .. 2.5
+  cropX: number; // -50 .. 50 (%)
+  cropY: number; // -50 .. 50 (%)
+  brightness: number; // 0.2 .. 1.0
+  blurPx: number; // 0 .. 24
+  overlayOpacity: number; // 0.15 .. 0.85
+  endBehavior: MvEndBehavior;
+  linkBroken?: boolean;
+  updatedAt: number;
+}
+
+export interface OnlineMvResult {
+  id: string;
+  title: string;
+  artist: string;
+  album?: string;
+  duration: number;
+  thumbnailUrl: string;
+  sourceName: string;
+  sourceUrl: string;
+  playableType: MvPlayableType;
+  playableUrl?: string;
+  embedProvider?: 'youtube' | 'vimeo' | 'dailymotion';
+  supportsWebPlayback: boolean;
+  supportsPreciseSync: boolean;
+  isOfficial?: boolean;
+  isPreviewClip?: boolean;
+  notice?: string;
+  matchScore?: number;
+}
+
+export interface MvRuntimeStatus {
+  state:
+    | 'inactive'
+    | 'loading'
+    | 'synced'
+    | 'correcting'
+    | 'waiting_offset'
+    | 'ended'
+    | 'embed_synced'
+    | 'embed_limited'
+    | 'autoplay_blocked'
+    | 'external_only'
+    | 'link_broken'
+    | 'error';
+  mvCurrentTime: number;
+  mvDuration: number;
+  driftSec: number;
+  message?: string;
+}
+

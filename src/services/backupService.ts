@@ -8,15 +8,19 @@ import {
   clearAiTasks,
   clearAllMusicData,
   getAllAiTasks,
+  getAllMvConfigs,
   getAllPlaylists,
   getAllStemRecords,
   getAllTracks,
   getAudioBlob,
+  getMvBlob,
   loadAudioSettings,
   loadPersonalization,
   loadPlaybackPrefs,
   saveAiTasksBatch,
   saveAudioSettings,
+  saveMvConfig,
+  saveMvVideoWithConfig,
   savePersonalization,
   savePlaybackPrefs,
   savePlaylist,
@@ -35,6 +39,7 @@ import {
   PlaybackPrefs,
   Playlist,
   TrackMetadata,
+  TrackMvConfig,
   TrackStemsRecord,
 } from '../types/music';
 
@@ -55,6 +60,12 @@ interface SerializedStemEntry {
   instrumentalBase64: string;
 }
 
+interface SerializedMvVideoEntry {
+  localVideoId: string;
+  mimeType: string;
+  videoBase64: string;
+}
+
 export interface EncryptedBackupSecretsEnvelope {
   algorithm: 'PBKDF2-SHA256-AES-256-GCM';
   iterations: number;
@@ -67,19 +78,23 @@ export interface EncryptedBackupSecretsEnvelope {
 
 export interface LuminaBackupBundle {
   format: 'lumina-music-backup';
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   exportedAt: number;
   manifest?: {
     trackCount: number;
     playlistCount: number;
     stemCount: number;
     taskCount: number;
+    mvCount?: number;
+    mvVideosCount?: number;
     includesEncryptedSecrets: boolean;
   };
   tracks: SerializedTrackEntry[];
   playlists: Playlist[];
   stems: SerializedStemEntry[];
   aiTasks: AiTaskRecord[];
+  mvConfigs?: TrackMvConfig[];
+  mvVideos?: SerializedMvVideoEntry[];
   settings: {
     audioSettings: AudioDspSettings;
     personalization: PersonalizationSettings;
@@ -105,9 +120,30 @@ export interface BackupImportSummary {
   providersRestored: number;
   keysRestored: number;
   includesEncryptedSecrets: boolean;
+  mvConfigsRestored: number;
+  mvVideosRestored: number;
+  mvBrokenLinks: number;
+  mvMissingLocalVideos: number;
+}
+
+export interface ExportBackupOptions {
+  passphrase?: string;
+  includeMvVideos?: boolean;
 }
 
 async function blobToBase64(blob: Blob): Promise<string> {
+  if (typeof FileReader !== 'undefined') {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        const res = typeof reader.result === 'string' ? reader.result : '';
+        const commaIdx = res.indexOf(',');
+        resolve(commaIdx >= 0 ? res.slice(commaIdx + 1) : res);
+      };
+      reader.onerror = () => reject(reader.error || new Error('读取二进制数据失败'));
+      reader.readAsDataURL(blob);
+    });
+  }
   const buf = await blob.arrayBuffer();
   const bytes = new Uint8Array(buf);
   const chunkSize = 0x8000;
@@ -137,11 +173,39 @@ function shouldNormalizeImportedTask(status: AiTaskStatus): boolean {
   );
 }
 
-export async function exportFullLuminaBackup(passphrase?: string): Promise<{
+function isProductionSafeOnlineUrl(raw?: string): boolean {
+  if (!raw) return false;
+  try {
+    const u = new URL(raw);
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return false;
+    const h = u.hostname.toLowerCase();
+    if (
+      h === 'localhost' ||
+      h === '127.0.0.1' ||
+      h === '::1' ||
+      h === '0.0.0.0' ||
+      h.endsWith('.local')
+    ) {
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function exportFullLuminaBackup(
+  passphraseOrOptions?: string | ExportBackupOptions
+): Promise<{
   bundle: LuminaBackupBundle;
   filename: string;
 }> {
-  const cleanPass = (passphrase || '').trim();
+  const opts: ExportBackupOptions =
+    typeof passphraseOrOptions === 'string'
+      ? { passphrase: passphraseOrOptions, includeMvVideos: false }
+      : passphraseOrOptions || {};
+
+  const cleanPass = (opts.passphrase || '').trim();
   if (cleanPass && cleanPass.length < 4) {
     throw new Error('备份加密口令至少需要 4 个字符');
   }
@@ -151,6 +215,7 @@ export async function exportFullLuminaBackup(passphrase?: string): Promise<{
     playlists,
     stemRecords,
     aiTasks,
+    mvConfigs,
     audioSettings,
     personalization,
     playbackPrefs,
@@ -161,6 +226,7 @@ export async function exportFullLuminaBackup(passphrase?: string): Promise<{
     getAllPlaylists(),
     getAllStemRecords(),
     getAllAiTasks(),
+    getAllMvConfigs(),
     loadAudioSettings(),
     loadPersonalization(),
     loadPlaybackPrefs(),
@@ -227,6 +293,24 @@ export async function exportFullLuminaBackup(passphrase?: string): Promise<{
     });
   }
 
+  const serializedMvVideos: SerializedMvVideoEntry[] = [];
+  if (opts.includeMvVideos) {
+    const seenVideoIds = new Set<string>();
+    for (const cfg of mvConfigs) {
+      if (cfg.sourceType === 'local' && cfg.localVideoId && !seenVideoIds.has(cfg.localVideoId)) {
+        seenVideoIds.add(cfg.localVideoId);
+        const vBlob = await getMvBlob(cfg.localVideoId);
+        if (vBlob && vBlob.size > 0) {
+          serializedMvVideos.push({
+            localVideoId: cfg.localVideoId,
+            mimeType: vBlob.type || cfg.localMimeType || 'video/mp4',
+            videoBase64: await blobToBase64(vBlob),
+          });
+        }
+      }
+    }
+  }
+
   // Explicitly strip any secret indicator or sealed vault token from unencrypted metadata
   const safeProviders = (providerResp.providers || []).map(
     ({ hasKey: _ignoredKey, sealedKey: _ignoredSealed, ...rest }) => rest
@@ -237,19 +321,23 @@ export async function exportFullLuminaBackup(passphrase?: string): Promise<{
 
   const bundle: LuminaBackupBundle = {
     format: 'lumina-music-backup',
-    version: 3,
+    version: 4,
     exportedAt: Date.now(),
     manifest: {
       trackCount: serializedTracks.length,
       playlistCount: playlists.length,
       stemCount: serializedStems.length,
       taskCount: aiTasks.length,
+      mvCount: mvConfigs.length,
+      mvVideosCount: serializedMvVideos.length,
       includesEncryptedSecrets: Boolean(encryptedSecrets && encryptedSecrets.keyCount > 0),
     },
     tracks: serializedTracks,
     playlists,
     stems: serializedStems,
     aiTasks,
+    mvConfigs,
+    ...(serializedMvVideos.length > 0 ? { mvVideos: serializedMvVideos } : {}),
     settings: {
       audioSettings,
       personalization,
@@ -354,6 +442,78 @@ export async function importFullLuminaBackup(
     stemsRestored++;
   }
 
+  // Restore MV configs & optional local video blobs
+  const mvVideoMap = new Map<string, Blob>();
+  for (const mvItem of parsed.mvVideos || []) {
+    if (mvItem?.localVideoId && mvItem.videoBase64) {
+      mvVideoMap.set(
+        mvItem.localVideoId,
+        base64ToBlob(mvItem.videoBase64, mvItem.mimeType || 'video/mp4')
+      );
+    }
+  }
+
+  let mvConfigsRestored = 0;
+  let mvVideosRestored = 0;
+  let mvBrokenLinks = 0;
+  let mvMissingLocalVideos = 0;
+
+  for (const cfg of parsed.mvConfigs || []) {
+    if (!cfg?.songId) continue;
+    if (cfg.sourceType === 'local') {
+      const restoredBlob = cfg.localVideoId ? mvVideoMap.get(cfg.localVideoId) : undefined;
+      if (restoredBlob && restoredBlob.size > 0) {
+        await saveMvVideoWithConfig(
+          { ...cfg, linkBroken: false },
+          restoredBlob
+        );
+        mvVideosRestored++;
+      } else {
+        await saveMvConfig({
+          ...cfg,
+          enabled: false,
+          linkBroken: true,
+        });
+        mvMissingLocalVideos++;
+      }
+      mvConfigsRestored++;
+      continue;
+    }
+
+    // Online MV config validation (flags invalid/localhost/expired or missing playableUrl cleanly)
+    let isBroken =
+      cfg.playableType === 'external_only' ||
+      !isProductionSafeOnlineUrl(cfg.playableUrl);
+
+    if (!isBroken && cfg.playableType === 'video' && cfg.playableUrl) {
+      try {
+        const ctrl = new AbortController();
+        const t = window.setTimeout(() => ctrl.abort(), 2200);
+        const headRes = await fetch(cfg.playableUrl, {
+          method: 'HEAD',
+          signal: ctrl.signal,
+        });
+        window.clearTimeout(t);
+        if (headRes.status === 404 || headRes.status === 410 || headRes.status === 403) {
+          isBroken = true;
+        }
+      } catch {
+        // Ignore CORS/timeout here; actual <video> decoder checks playability during playback
+      }
+    }
+
+    if (isBroken) {
+      mvBrokenLinks++;
+    }
+
+    await saveMvConfig({
+      ...cfg,
+      enabled: isBroken ? false : cfg.enabled,
+      linkBroken: isBroken,
+    });
+    mvConfigsRestored++;
+  }
+
   if (parsed.settings?.audioSettings) {
     await saveAudioSettings(parsed.settings.audioSettings);
   }
@@ -403,5 +563,10 @@ export async function importFullLuminaBackup(
     providersRestored,
     keysRestored,
     includesEncryptedSecrets: hasEncryptedSecrets,
+    mvConfigsRestored,
+    mvVideosRestored,
+    mvBrokenLinks,
+    mvMissingLocalVideos,
   };
 }
+
